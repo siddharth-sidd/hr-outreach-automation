@@ -8,7 +8,10 @@ A MERN-stack tool for managing HR contacts, drafting personalized job inquiry em
 - Manage contact list and campaign status.
 - Generate editable AI-assisted email drafts (optional provider configured through environment).
 - Preview each individual email before sending.
-- Attach a single PDF resume.
+- Store multiple PDF resumes with editable target roles and skill keywords.
+- Automatically recommend a role-matched resume and use a marked common/default resume when no targeted resume reaches the match threshold.
+- Edit resume metadata, replace a PDF later, switch the common fallback, and manually override the selected attachment for any draft.
+- Attach the selected PDF resume to each approved email.
 - Gmail OAuth 2.0 integration (no Gmail password or app password stored).
 - Track pending, sent, skipped, and failed statuses.
 - Duplicate-send guard based on campaign + recipient.
@@ -32,7 +35,8 @@ A MERN-stack tool for managing HR contacts, drafting personalized job inquiry em
 ## Local setup
 
 1. Clone this repository.
-2. Install dependencies:
+2. Create a local `server/uploads` folder (created automatically when the API starts); resume PDFs are stored there and never committed to Git.
+3. Install dependencies:
    ```bash
    npm install
    npm run install:all
@@ -55,6 +59,10 @@ A MERN-stack tool for managing HR contacts, drafting personalized job inquiry em
 6. Click **Connect Gmail** in the app and complete Google's consent flow.
 
 Request the narrowest Gmail scope that allows sending (`https://www.googleapis.com/auth/gmail.send`). Never paste OAuth credentials into source code or commit `.env`.
+
+## Resume matching
+
+From **Resume Library**, upload one PDF per target role and add comma-separated target roles and skills (for example, “MERN Stack Developer, React Developer” and “React, Node.js, Express, MongoDB”). Mark one general-purpose resume as **Common fallback**. The server scores role and skill overlap during draft generation; if no candidate resume reaches the match threshold, it selects the common fallback. The draft editor shows the selection and reason, and you can choose another resume before approving the email. Use **Edit details** to update keywords later or **Replace PDF** to upload a newer version.
 
 ## AI draft generation
 
