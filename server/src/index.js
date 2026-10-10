@@ -355,8 +355,9 @@ app.post('/api/resumes', libraryResumeUpload.single('resume'), async (req, res, 
   try {
     if (!req.file) return res.status(400).json({ error: 'Choose a PDF resume first.' });
     const currentCount = await Resume.countDocuments();
+    const hasDefault = Boolean(await Resume.exists({ isDefault: true }));
     const name = String(req.body.name || req.file.originalname.replace(/\.pdf$/i, '')).trim().slice(0, 100);
-    const isDefault = String(req.body.isDefault || 'false') === 'true' || currentCount === 0;
+    const isDefault = String(req.body.isDefault || 'false') === 'true' || currentCount === 0 || !hasDefault;
     const targetRoles = splitKeywords(req.body.targetRoles).slice(0, 30);
     const skills = splitKeywords(req.body.skills).slice(0, 100);
     if (isDefault) await Resume.updateMany({}, { $set: { isDefault: false } });
@@ -386,7 +387,14 @@ app.put('/api/resumes/:id', libraryResumeUpload.single('resume'), async (req, re
       return res.status(404).json({ error: 'Resume not found.' });
     }
     const nextDefault = String(req.body.isDefault || 'false') === 'true';
-    if (nextDefault) await Resume.updateMany({ _id: { $ne: resume._id } }, { $set: { isDefault: false } });
+    if (nextDefault) {
+      await Resume.updateMany({ _id: { $ne: resume._id } }, { $set: { isDefault: false } });
+    } else if (resume.isDefault) {
+      const alternate = await Resume.findOne({ _id: { $ne: resume._id } }).sort({ createdAt: -1 });
+      if (!alternate) return res.status(400).json({ error: 'Keep one common fallback resume in the library. Add another resume before changing this one.' });
+      alternate.isDefault = true;
+      await alternate.save();
+    }
     if (typeof req.body.name === 'string') resume.name = req.body.name.trim().slice(0, 100) || resume.name;
     if (typeof req.body.targetRoles === 'string') resume.targetRoles = splitKeywords(req.body.targetRoles).slice(0, 30);
     if (typeof req.body.skills === 'string') resume.skills = splitKeywords(req.body.skills).slice(0, 100);
@@ -414,7 +422,7 @@ app.delete('/api/resumes/:id', async (req, res, next) => {
     if (!resume) return res.status(404).json({ error: 'Resume not found.' });
     const others = await Resume.find({ _id: { $ne: resume._id } }).sort({ createdAt: -1 });
     const nextDefault = others.find(r => r.isDefault) || others[0] || null;
-    if (resume.isDefault && nextDefault) nextDefault.isDefault = true;
+    if (nextDefault && !nextDefault.isDefault) nextDefault.isDefault = true;
     if (nextDefault) await nextDefault.save();
     await Draft.updateMany({ resume: resume._id, status: { $ne: 'sent' } }, {
       $set: {
