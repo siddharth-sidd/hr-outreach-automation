@@ -1,6 +1,6 @@
 # HR Outreach Automation
 
-A MERN-stack tool for managing HR contacts, drafting personalized job inquiry emails, reviewing each message, attaching one PDF resume, and sending approved emails through Gmail.
+A MERN-stack tool for managing HR contacts, drafting personalized job inquiry emails, reviewing each message, attaching the best-matched PDF resume, and sending approved emails through Gmail.
 
 ## Features
 
@@ -14,7 +14,7 @@ A MERN-stack tool for managing HR contacts, drafting personalized job inquiry em
 - Attach the selected PDF resume to each approved email.
 - Gmail OAuth 2.0 integration (no Gmail password or app password stored).
 - Track pending, sent, skipped, and failed statuses.
-- Duplicate-send guard based on campaign + recipient.
+- Prevent sending the same draft twice.
 - Development mode defaults to dry-run; real sending requires explicit configuration and an in-app approval.
 
 ## Stack
@@ -35,13 +35,12 @@ A MERN-stack tool for managing HR contacts, drafting personalized job inquiry em
 ## Local setup
 
 1. Clone this repository.
-2. Create a local `server/uploads` folder (created automatically when the API starts); resume PDFs are stored there and never committed to Git.
-3. Install dependencies:
+2. Install dependencies:
    ```bash
    npm install
    npm run install:all
    ```
-3. Copy `.env.example` to `.env` in the project root and fill in your own values.
+3. Copy `.env.example` to `.env` in the project root and fill in your own values. The server creates the resume upload folder automatically.
 4. Start MongoDB.
 5. Run both API and client:
    ```bash
