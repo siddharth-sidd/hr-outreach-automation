@@ -137,7 +137,7 @@ export default function App() {
   }
   async function skipDraft(){
     if(!chosenDraft||!confirm('Skip this email draft? It will not be sent.'))return;
-    await task('skip',async()=>{await api('/api/drafts/'+chosenDraft._id,json({}));await refresh();setDraftId('');},'Draft skipped.');
+    await task('skip',async()=>{await api('/api/drafts/'+chosenDraft._id+'/skip',json({}));await refresh();setDraftId('');},'Draft skipped.');
   }
   async function sendDraft(){
     if(!chosenDraft)return;
