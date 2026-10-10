@@ -133,7 +133,7 @@ export default function App() {
   }
   async function chooseDraftResume(resumeId){
     if(!chosenDraft)return;
-    await task('choose-resume',async()=>{const result=await api('/api/drafts/'+chosenDraft._id,json({resumeId},'PATCH'));setDrafts(ds=>ds.map(d=>d._id===result.draft._id?result.draft:d));},'Attachment selection updated.');
+    await task('choose-resume',async()=>{const result=await api('/api/drafts/'+chosenDraft._id,json({resumeId,subject:chosenDraft.subject,body:chosenDraft.body},'PATCH'));setDrafts(ds=>ds.map(d=>d._id===result.draft._id?result.draft:d));},'Attachment selection updated.');
   }
   async function skipDraft(){
     if(!chosenDraft||!confirm('Skip this email draft? It will not be sent.'))return;
@@ -143,7 +143,7 @@ export default function App() {
     if(!chosenDraft)return;
     const prompt=health.dryRun?'Dry-run is on. This test will not send an email. Continue with the approval-flow test?':`Send this individual email to ${chosenDraft.recipient} with “${chosenDraft.resumeName}” attached? Verify the subject, content, and attachment first.`;
     if(!confirm(prompt))return;
-    await task('send',async()=>{const result=await api('/api/drafts/'+chosenDraft._id+'/send',json({approved:true}));if(result.dryRun)setNotice({type:'success',message:result.message});else{await refresh();setNotice({type:'success',message:result.message||'Email sent successfully.'});}},'');
+    await task('send',async()=>{await api('/api/drafts/'+chosenDraft._id,json({subject:chosenDraft.subject,body:chosenDraft.body,resumeId:chosenDraft.resume||null},'PATCH'));const result=await api('/api/drafts/'+chosenDraft._id+'/send',json({approved:true}));if(result.dryRun)setNotice({type:'success',message:result.message});else{await refresh();setNotice({type:'success',message:result.message||'Email sent successfully.'});}},'');
   }
   async function updateContactStatus(contact,status){
     await task('status-'+contact._id,async()=>{await api('/api/contacts/'+contact._id,json({status},'PATCH'));await refresh();},'Contact status updated.');
