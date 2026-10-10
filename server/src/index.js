@@ -41,9 +41,26 @@ const ContactSchema = new mongoose.Schema({
   status: { type: String, enum: ['new', 'contacted', 'replied', 'do_not_contact'], default: 'new' }
 }, { timestamps: true });
 
+const ResumeSchema = new mongoose.Schema({
+  name: { type: String, required: true, trim: true },
+  originalName: { type: String, required: true },
+  fileName: { type: String, required: true },
+  size: { type: Number, required: true },
+  targetRoles: { type: [String], default: [] },
+  skills: { type: [String], default: [] },
+  description: { type: String, default: '' },
+  isDefault: { type: Boolean, default: false }
+}, { timestamps: true });
+
 const DraftSchema = new mongoose.Schema({
   contact: { type: mongoose.Schema.Types.ObjectId, ref: 'Contact', required: true },
   recipient: { type: String, required: true, lowercase: true, trim: true },
+  resume: { type: mongoose.Schema.Types.ObjectId, ref: 'Resume', default: null },
+  resumeName: { type: String, default: '' },
+  resumeMatchScore: { type: Number, default: 0 },
+  resumeMatchReason: { type: String, default: '' },
+  fallbackUsed: { type: Boolean, default: false },
+  resumeAutoSelected: { type: Boolean, default: true },
   company: { type: String, default: '' },
   roleTarget: { type: String, default: 'Entry-Level Software Developer' },
   subject: { type: String, required: true, trim: true },
@@ -55,6 +72,7 @@ const DraftSchema = new mongoose.Schema({
 
 DraftSchema.index({ contact: 1, status: 1 });
 const Contact = mongoose.model('Contact', ContactSchema);
+const Resume = mongoose.model('Resume', ResumeSchema);
 const Draft = mongoose.model('Draft', DraftSchema);
 
 const memoryStorage = multer.memoryStorage();
@@ -65,6 +83,13 @@ const csvUpload = multer({ storage: memoryStorage, limits: { fileSize: 2 * 1024 
 const resumeUpload = multer({ storage: multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, uploadDir),
   filename: (_req, _file, cb) => cb(null, 'resume.pdf')
+}), limits: { fileSize: MAX_RESUME_MB * 1024 * 1024 }, fileFilter: (_req, file, cb) => {
+  const allowed = file.mimetype === 'application/pdf' || file.originalname.toLowerCase().endsWith('.pdf');
+  cb(allowed ? null : new Error('Resume must be a PDF file.'), allowed);
+}});
+const libraryResumeUpload = multer({ storage: multer.diskStorage({
+  destination: (_req, _file, cb) => cb(null, uploadDir),
+  filename: (_req, _file, cb) => cb(null, `resume-${Date.now()}-${randomBytes(10).toString('hex')}.pdf`)
 }), limits: { fileSize: MAX_RESUME_MB * 1024 * 1024 }, fileFilter: (_req, file, cb) => {
   const allowed = file.mimetype === 'application/pdf' || file.originalname.toLowerCase().endsWith('.pdf');
   cb(allowed ? null : new Error('Resume must be a PDF file.'), allowed);
@@ -98,6 +123,49 @@ function validEmail(email) {
 function escapeHtml(text) {
   return String(text).replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]);
 }
+function splitKeywords(value) {
+  return String(value || '').split(/[,;|\\n]/).map(s => s.trim()).filter(Boolean);
+}
+function words(value) {
+  return new Set(String(value || '').toLowerCase().replace(/[^a-z0-9+#.\s-]/g, ' ').split(/[\s,;|/-]+/).filter(w => w.length > 1));
+}
+function scoreResume(resume, contact, applicant = {}) {
+  const targetRole = contact.role?.trim() || applicant.targetRole || 'Entry-Level Software Developer';
+  const jobText = `${targetRole} ${applicant.targetRole || ''}`;
+  const jobWords = words(jobText);
+  const roleWords = words((resume.targetRoles || []).join(' '));
+  const skillWords = words((resume.skills || []).join(' '));
+  const exactRole = (resume.targetRoles || []).some(role => {
+    const a = role.toLowerCase().trim(), b = targetRole.toLowerCase().trim();
+    return a && b && (a.includes(b) || b.includes(a));
+  });
+  const roleHits = [...jobWords].filter(w => roleWords.has(w)).length;
+  const roleScore = jobWords.size ? Math.min(65, (roleHits / jobWords.size) * 65) : 0;
+  const applicantSkillWords = words(applicant.skills || '');
+  const skillHits = [...applicantSkillWords].filter(w => skillWords.has(w)).length;
+  const skillScore = applicantSkillWords.size ? Math.min(35, (skillHits / applicantSkillWords.size) * 35) : 0;
+  const score = Math.round(Math.min(100, roleScore + skillScore + (exactRole ? 25 : 0)));
+  return { score, reason: exactRole ? `Target role matches “${targetRole}”.` : `Matched ${roleHits} role keywords and ${skillHits} skill keywords.` };
+}
+async function selectResumeForDraft(contact, applicant = {}, requestedResumeId = '') {
+  const all = await Resume.find().lean();
+  if (requestedResumeId) {
+    const selected = all.find(r => String(r._id) === String(requestedResumeId));
+    if (!selected) throw new Error('The selected resume was not found. Refresh the resume library and try again.');
+    return { resume: selected, score: 100, reason: 'Manually selected by you.', fallbackUsed: false, auto: false };
+  }
+  const ranked = all.map(resume => ({ resume, ...scoreResume(resume, contact, applicant) })).sort((a, b) => b.score - a.score);
+  const best = ranked[0];
+  if (best && best.score >= 25) {
+    return { resume: best.resume, score: best.score, reason: best.reason, fallbackUsed: false, auto: true };
+  }
+  const fallback = all.find(r => r.isDefault);
+  if (fallback) {
+    return { resume: fallback, score: best?.score || 0, reason: 'No resume met the match threshold; the common/default resume was selected as fallback.', fallbackUsed: true, auto: true };
+  }
+  return { resume: null, score: best?.score || 0, reason: 'No suitable resume or common fallback is uploaded yet.', fallbackUsed: true, auto: true };
+}
+
 function defaultDraft(contact, applicant = {}) {
   const fullName = applicant.name?.trim() || 'Your Name';
   const jobTarget = applicant.targetRole?.trim() || 'Entry-Level Software Developer';
@@ -161,16 +229,21 @@ async function generateWithAI(contact, applicant = {}) {
   return { subject: parsed.subject.slice(0, 240), body: parsed.body.slice(0, 8000) };
 }
 
-app.get('/api/health', (_req, res) => {
-  const { connected } = getAuthenticatedOAuthClient();
-  res.json({
-    ok: true,
-    database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
-    gmailConnected: connected,
-    resumeUploaded: fs.existsSync(path.join(uploadDir, 'resume.pdf')),
-    dryRun: DRY_RUN,
-    aiConfigured: Boolean(process.env.AI_API_KEY)
-  });
+app.get('/api/health', async (_req, res, next) => {
+  try {
+    const { connected } = getAuthenticatedOAuthClient();
+    const resumeCount = await Resume.countDocuments();
+    res.json({
+      ok: true,
+      database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
+      gmailConnected: connected,
+      resumeUploaded: resumeCount > 0 || fs.existsSync(path.join(uploadDir, 'resume.pdf')),
+      resumeCount,
+      defaultResumeUploaded: Boolean(await Resume.exists({ isDefault: true })),
+      dryRun: DRY_RUN,
+      aiConfigured: Boolean(process.env.AI_API_KEY)
+    });
+  } catch (error) { next(error); }
 });
 
 app.get('/api/auth/google', (_req, res) => {
@@ -271,6 +344,93 @@ app.delete('/api/contacts/:id', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+app.get('/api/resumes', async (_req, res, next) => {
+  try {
+    const resumes = await Resume.find().sort({ isDefault: -1, updatedAt: -1 }).lean();
+    res.json({ resumes: resumes.map(({ fileName, ...resume }) => ({ ...resume, uploaded: fs.existsSync(path.join(uploadDir, fileName)) })) });
+  } catch (error) { next(error); }
+});
+
+app.post('/api/resumes', libraryResumeUpload.single('resume'), async (req, res, next) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'Choose a PDF resume first.' });
+    const currentCount = await Resume.countDocuments();
+    const name = String(req.body.name || req.file.originalname.replace(/\.pdf$/i, '')).trim().slice(0, 100);
+    const isDefault = String(req.body.isDefault || 'false') === 'true' || currentCount === 0;
+    const targetRoles = splitKeywords(req.body.targetRoles).slice(0, 30);
+    const skills = splitKeywords(req.body.skills).slice(0, 100);
+    if (isDefault) await Resume.updateMany({}, { $set: { isDefault: false } });
+    const resume = await Resume.create({
+      name: name || 'Resume',
+      originalName: req.file.originalname.slice(0, 250),
+      fileName: req.file.filename,
+      size: req.file.size,
+      targetRoles,
+      skills,
+      description: String(req.body.description || '').slice(0, 1000),
+      isDefault
+    });
+    const { fileName, ...publicResume } = resume.toObject();
+    res.status(201).json({ resume: { ...publicResume, uploaded: true } });
+  } catch (error) {
+    if (req.file?.path && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+    next(error);
+  }
+});
+
+app.put('/api/resumes/:id', libraryResumeUpload.single('resume'), async (req, res, next) => {
+  try {
+    const resume = await Resume.findById(req.params.id);
+    if (!resume) {
+      if (req.file?.path && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+      return res.status(404).json({ error: 'Resume not found.' });
+    }
+    const nextDefault = String(req.body.isDefault || 'false') === 'true';
+    if (nextDefault) await Resume.updateMany({ _id: { $ne: resume._id } }, { $set: { isDefault: false } });
+    if (typeof req.body.name === 'string') resume.name = req.body.name.trim().slice(0, 100) || resume.name;
+    if (typeof req.body.targetRoles === 'string') resume.targetRoles = splitKeywords(req.body.targetRoles).slice(0, 30);
+    if (typeof req.body.skills === 'string') resume.skills = splitKeywords(req.body.skills).slice(0, 100);
+    if (typeof req.body.description === 'string') resume.description = req.body.description.slice(0, 1000);
+    if (req.body.isDefault !== undefined) resume.isDefault = nextDefault;
+    if (req.file) {
+      const oldPath = path.join(uploadDir, resume.fileName);
+      resume.fileName = req.file.filename;
+      resume.originalName = req.file.originalname.slice(0, 250);
+      resume.size = req.file.size;
+      if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+    }
+    await resume.save();
+    const { fileName, ...publicResume } = resume.toObject();
+    res.json({ resume: { ...publicResume, uploaded: true } });
+  } catch (error) {
+    if (req.file?.path && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+    next(error);
+  }
+});
+
+app.delete('/api/resumes/:id', async (req, res, next) => {
+  try {
+    const resume = await Resume.findById(req.params.id);
+    if (!resume) return res.status(404).json({ error: 'Resume not found.' });
+    const others = await Resume.find({ _id: { $ne: resume._id } }).sort({ createdAt: -1 });
+    const nextDefault = others.find(r => r.isDefault) || others[0] || null;
+    if (resume.isDefault && nextDefault) nextDefault.isDefault = true;
+    if (nextDefault) await nextDefault.save();
+    await Draft.updateMany({ resume: resume._id, status: { $ne: 'sent' } }, {
+      $set: {
+        resume: nextDefault?._id || null,
+        resumeName: nextDefault?.name || '',
+        fallbackUsed: true,
+        resumeMatchReason: 'Previously selected resume was deleted; using the available default resume instead.'
+      }
+    });
+    await resume.deleteOne();
+    const filePath = path.join(uploadDir, resume.fileName);
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    res.json({ ok: true, defaultResumeId: nextDefault?._id || null });
+  } catch (error) { next(error); }
+});
+
 app.get('/api/drafts', async (_req, res, next) => {
   try {
     const drafts = await Draft.find().sort({ updatedAt: -1 }).limit(500).lean();
@@ -284,12 +444,20 @@ app.post('/api/drafts/generate', async (req, res, next) => {
     const contact = await Contact.findById(contactId);
     if (!contact) return res.status(404).json({ error: 'Choose a contact first.' });
     if (contact.status === 'do_not_contact') return res.status(400).json({ error: 'This contact is marked Do Not Contact.' });
-    const generated = await generateWithAI(contact, applicant);
+    const targetProfile = { ...applicant, targetRole: contact.role?.trim() || applicant.targetRole || 'Entry-Level Software Developer' };
+    const generated = await generateWithAI(contact, targetProfile);
+    const selection = await selectResumeForDraft(contact, targetProfile, req.body.resumeId || '');
     const draft = await Draft.create({
       contact: contact._id,
       recipient: contact.email,
+      resume: selection.resume?._id || null,
+      resumeName: selection.resume?.name || '',
+      resumeMatchScore: selection.score,
+      resumeMatchReason: selection.reason,
+      fallbackUsed: selection.fallbackUsed,
+      resumeAutoSelected: selection.auto,
       company: contact.company,
-      roleTarget: applicant.targetRole || 'Entry-Level Software Developer',
+      roleTarget: targetProfile.targetRole,
       subject: generated.subject,
       body: generated.body
     });
@@ -302,9 +470,19 @@ app.patch('/api/drafts/:id', async (req, res, next) => {
     const draft = await Draft.findById(req.params.id);
     if (!draft) return res.status(404).json({ error: 'Draft not found.' });
     if (draft.status === 'sent') return res.status(409).json({ error: 'Sent drafts cannot be edited.' });
-    const { subject, body } = req.body || {};
+    const { subject, body, resumeId } = req.body || {};
     if (typeof subject === 'string') draft.subject = subject.trim().slice(0, 240);
     if (typeof body === 'string') draft.body = body.slice(0, 8000);
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'resumeId')) {
+      const selectedResume = resumeId ? await Resume.findById(resumeId) : null;
+      if (resumeId && !selectedResume) return res.status(400).json({ error: 'Selected resume not found.' });
+      draft.resume = selectedResume?._id || null;
+      draft.resumeName = selectedResume?.name || '';
+      draft.resumeMatchScore = selectedResume ? 100 : 0;
+      draft.resumeMatchReason = selectedResume ? 'Manually selected by you.' : 'No resume selected.';
+      draft.fallbackUsed = false;
+      draft.resumeAutoSelected = false;
+    }
     draft.status = 'pending';
     draft.lastError = '';
     await draft.save();
@@ -332,8 +510,9 @@ app.post('/api/drafts/:id/send', async (req, res, next) => {
     if (draft.status === 'sent') return res.status(409).json({ error: 'This draft has already been sent.' });
     if (draft.status === 'skipped') return res.status(409).json({ error: 'This draft was skipped. Generate a new draft to send.' });
     if (!validEmail(draft.recipient)) return res.status(400).json({ error: 'Recipient email is invalid.' });
-    const resumePath = path.join(uploadDir, 'resume.pdf');
-    if (!fs.existsSync(resumePath)) return res.status(400).json({ error: 'Upload your PDF resume before sending.' });
+    const attachedResume = draft.resume ? await Resume.findById(draft.resume) : null;
+    const resumePath = attachedResume ? path.join(uploadDir, attachedResume.fileName) : path.join(uploadDir, 'resume.pdf');
+    if (!fs.existsSync(resumePath)) return res.status(400).json({ error: 'The selected resume file is missing. Open Resume Library and upload or select a valid PDF.' });
 
     if (DRY_RUN) return res.json({ dryRun: true, message: 'Dry-run is enabled. No email was sent. Set DRY_RUN=false in your local .env after testing to enable Gmail sends.' });
 
