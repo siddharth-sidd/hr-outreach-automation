@@ -124,7 +124,7 @@ function escapeHtml(text) {
   return String(text).replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]);
 }
 function splitKeywords(value) {
-  return String(value || '').split(/[,;|\\n]/).map(s => s.trim()).filter(Boolean);
+  return String(value || '').split(/[,;|\n]/).map(s => s.trim()).filter(Boolean);
 }
 function words(value) {
   return new Set(String(value || '').toLowerCase().replace(/[^a-z0-9+#.\s-]/g, ' ').split(/[\s,;|/-]+/).filter(w => w.length > 1));
@@ -143,9 +143,9 @@ function scoreResume(resume, contact, applicant = {}) {
   const roleScore = jobWords.size ? Math.min(65, (roleHits / jobWords.size) * 65) : 0;
   const applicantSkillWords = words(applicant.skills || '');
   const skillHits = [...applicantSkillWords].filter(w => skillWords.has(w)).length;
-  const skillScore = applicantSkillWords.size ? Math.min(35, (skillHits / applicantSkillWords.size) * 35) : 0;
+  const skillScore = applicantSkillWords.size ? Math.min(20, (skillHits / applicantSkillWords.size) * 20) : 0;
   const score = Math.round(Math.min(100, roleScore + skillScore + (exactRole ? 25 : 0)));
-  return { score, reason: exactRole ? `Target role matches “${targetRole}”.` : `Matched ${roleHits} role keywords and ${skillHits} skill keywords.` };
+  return { score, roleHits, exactRole, reason: exactRole ? `Target role matches “${targetRole}”.` : `Matched ${roleHits} role keywords and ${skillHits} skill keywords.` };
 }
 async function selectResumeForDraft(contact, applicant = {}, requestedResumeId = '') {
   const all = await Resume.find().lean();
@@ -156,7 +156,7 @@ async function selectResumeForDraft(contact, applicant = {}, requestedResumeId =
   }
   const ranked = all.map(resume => ({ resume, ...scoreResume(resume, contact, applicant) })).sort((a, b) => b.score - a.score);
   const best = ranked[0];
-  if (best && best.score >= 25) {
+  if (best && best.score >= 25 && (best.exactRole || best.roleHits >= 2)) {
     return { resume: best.resume, score: best.score, reason: best.reason, fallbackUsed: false, auto: true };
   }
   const fallback = all.find(r => r.isDefault);
